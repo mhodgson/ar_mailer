@@ -1,5 +1,6 @@
 require 'optparse'
 require 'net/smtp'
+require 'net/imap'
 require 'smtp_tls'
 require 'rubygems'
 
@@ -120,6 +121,9 @@ class Add#{table_name.classify} < ActiveRecord::Migration
       t.column :last_send_attempt, :integer, :default => 0
       t.column :mail, :text
       t.column :created_on, :datetime
+      t.column :sent, :boolean, :default => false
+      t.column :status, :string
+      t.column :message_id, :string
     end
   end
 
@@ -199,7 +203,11 @@ end
     options[:MaxAge] = 86400 * 7
     options[:Once] = false
     options[:RailsEnv] = ENV['RAILS_ENV']
-    options[:TableName] = 'Email'
+    options[:TableName] = 'Email'\
+    options[:Imap] = ''
+    options[:Port] = 993
+    options[:Login] = ''
+    options[:Password] = ''
     options[:Pidfile] = options[:Chdir] + '/log/ar_sendmail.pid'
 
     opts = OptionParser.new do |opts|
@@ -302,6 +310,30 @@ end
               "Be verbose",
               "Default: #{options[:Verbose]}") do |verbose|
         options[:Verbose] = verbose
+      end
+      
+      opts.on("-i", "--imap",
+              "Imap server used to check for bounces",
+              "Default: none") do |name|
+        options[:Imap] = name
+      end
+      
+      opts.on("-l", "--login",
+              "login name to check for bounces",
+              "Default: none") do |name|
+        options[:Login] = name
+      end
+      
+      opts.on(      "--password",
+              "password name to check for bounces",
+              "Default: none") do |name|
+        options[:Password] = name
+      end
+      
+      opts.on(      "--port",
+              "port to check for bounces",
+              "Default: #{options[:Port]}") do |name|
+        options[:Port] = name
       end
 
       opts.on("-h", "--help",
@@ -411,10 +443,14 @@ end
 
     @batch_size = options[:BatchSize]
     @delay = options[:Delay]
-    @email_class = Object.path2class options[:TableName]
+    @email_class = Object.path2class options[:TableName]\
     @once = options[:Once]
     @verbose = options[:Verbose]
     @max_age = options[:MaxAge]
+    @imap = options[:Imap]
+    @port = options[:Port]
+    @login = options[:Login]
+    @password = options[:Password]
 
     @failed_auth_count = 0
   end
@@ -426,7 +462,7 @@ end
   def cleanup
     return if @max_age == 0
     timeout = Time.now - @max_age
-    conditions = ['last_send_attempt > 0 and created_on < ?', timeout]
+    conditions = ['last_send_attempt > 0 and created_on < ? AND sent IS TRUE', timeout]
     mail = @email_class.destroy_all conditions
 
     log "expired #{mail.length} emails from the queue"
@@ -447,7 +483,7 @@ end
         email = emails.shift
         begin
           res = smtp.send_message email.mail, email.from, email.to
-          email.destroy
+          email.update_attribute(:sent, true)
           log "sent email %011d from %s to %s: %p" %
                 [email.id, email.from, email.to, res]
         rescue Net::SMTPFatalError => e
@@ -481,6 +517,28 @@ end
     # ignore SMTPServerBusy/EPIPE/ECONNRESET from Net::SMTP.start's ensure
   end
 
+  def check_bounces
+    imap = Net::IMAP.new(@imap, @port, true)
+    imap.login(@login, @password)
+    imap.select('INBOX')
+    imap.search(['ALL']).each do |message_id|
+      msg = imap.fetch(message_id,'RFC822')[0].attr['RFC822']
+
+      receive(msg)
+      #Mark message as deleted and it will be removed from storage when user session closd
+      imap.store(message_id, "+FLAGS", [:Deleted])
+    end
+    # tell server to permanently remove all messages flagged as :Deleted
+    imap.expunge()
+    imap.logout()
+    imap.disconnect()
+  end
+  
+  def receive(email)
+    bounce = BouncedDelivery.from_email(email)
+    msg    = @email_class.find_by_message_id(bounce.original_message_id)
+    msg.update_attribute(:status, bounce.status)
+  end
   ##
   # Prepares ar_sendmail for exiting
 
@@ -495,7 +553,7 @@ end
   # last 300 seconds.
 
   def find_emails
-    options = { :conditions => ['last_send_attempt < ?', Time.now.to_i - 300] }
+    options = { :conditions => ['last_send_attempt < ? AND sent IS FALSE', Time.now.to_i - 300] }
     options[:limit] = batch_size unless batch_size.nil?
     mail = @email_class.find :all, options
 
@@ -531,6 +589,7 @@ end
       begin
         cleanup
         deliver find_emails
+        check_bounces
       rescue ActiveRecord::Transactions::TransactionError
       end
       break if @once
@@ -550,5 +609,40 @@ end
     ActionMailer::Base.smtp_settings rescue ActionMailer::Base.server_settings
   end
 
+end
+
+class BouncedDelivery
+  
+  attr_accessor :status_info, :original_message_id
+  
+  def self.from_email(email)
+    returning(bounce = self.new) do
+      status_part = email.parts.detect do |part|
+        part.content_type == "message/delivery-status"
+      end
+      statuses = status_part.body.split(/\n/)
+      bounce.status_info = statuses.inject({}) do |hash, line|
+        key, value = line.split(/:/)
+        hash[key] = value.strip rescue nil
+        hash
+      end
+      original_message_part = email.parts.detect do |part|
+        part.content_type == "message/rfc822"
+      end
+      parsed_msg = TMail::Mail.parse(original_message_part.body)
+      bounce.original_message_id = parsed_msg.message_id
+    end
+  end
+  
+  def status
+    case status_info['Status']
+    when /^5/
+      'Failure'
+    when /^4/
+      'Temporary Failure'
+    when /^2/
+      'Success'
+    end
+  end
 end
 
