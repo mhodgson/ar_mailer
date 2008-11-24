@@ -90,7 +90,7 @@ class ActionMailer::ARMailer < ActionMailer::Base
   def perform_delivery_activerecord(mail)
     mail.destinations.each do |destination|
       @@email_class.create :mail => mail.encoded, :to => destination,
-                           :from => mail.from.first
+                           :from => mail.from.first, :message_id => mail.message_id
     end
   end
 

@@ -462,7 +462,7 @@ end
   def cleanup
     return if @max_age == 0
     timeout = Time.now - @max_age
-    conditions = ['last_send_attempt > 0 and created_on < ? AND sent IS TRUE', timeout]
+    conditions = ["last_send_attempt > 0 and created_on < ? AND status <> 'Failure'", timeout]
     mail = @email_class.destroy_all conditions
 
     log "expired #{mail.length} emails from the queue"
@@ -525,7 +525,7 @@ end
       msg = imap.fetch(message_id,'RFC822')[0].attr['RFC822']
 
       receive(msg)
-      #Mark message as deleted and it will be removed from storage when user session closd
+      #Mark message as deleted and it will be removed from storage when user session closed
       imap.store(message_id, "+FLAGS", [:Deleted])
     end
     # tell server to permanently remove all messages flagged as :Deleted

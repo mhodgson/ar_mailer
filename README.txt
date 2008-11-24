@@ -12,7 +12,7 @@ http://seattlerb.org/ar_mailer
 
 and for forked additions
 
-http://github.com/adzap/ar_mailer/wikis
+http://github.com/mhodgson/ar_mailer/wikis
 
 Bugs:
 
