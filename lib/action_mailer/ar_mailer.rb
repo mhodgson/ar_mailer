@@ -89,6 +89,7 @@ class ActionMailer::ARMailer < ActionMailer::Base
 
   def perform_delivery_activerecord(mail)
     mail.destinations.each do |destination|
+      mail.message_id = TMail.new_message_id
       @@email_class.create :mail => mail.encoded, :to => destination,
                            :from => mail.from.first, :message_id => mail.message_id
     end
